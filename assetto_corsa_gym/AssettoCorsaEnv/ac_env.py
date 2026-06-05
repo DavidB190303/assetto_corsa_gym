@@ -1,6 +1,10 @@
 import os
 import sys
 import numpy as np
+import subprocess
+import time
+import re
+import random
 import pandas as pd
 import pickle
 from gym import spaces
@@ -9,6 +13,7 @@ from gym.spaces import Box
 from gym import utils as gym_utils
 from datetime import datetime
 import time
+import shutil
 import yaml
 import json
 from pathlib import Path
@@ -248,12 +253,18 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         self.enable_out_of_track_penalty = self.config.enable_out_of_track_penalty # oot penalization in the reward function
 
         self.penalize_actions_diff = config.penalize_actions_diff
+        self.car_ballast_range = config.get('car_ballast_range')
         self.penalize_actions_diff_coef = config.penalize_actions_diff_coef
 
         self.max_laps_number = self.config.max_laps_number
 
         self.tracks_path = os.path.join(self.ac_configs_path, "tracks")
         self.cars_paths = os.path.join(self.ac_configs_path, "cars")
+
+        # Paths for Assetto Corsa process management
+        self.ac_exe_path = config.ac_exe_path
+        self.ac_cfg_path = config.ac_cfg_path
+        self.race_ini_path = os.path.join(self.ac_cfg_path, 'race.ini')
 
         self.tracks_config = load_yaml(os.path.join(self.tracks_path, "config.yaml"))
         self.set_track(self.track_name)
@@ -660,6 +671,40 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
             assert self.static_info["TrackFullName"] == self.track_name, f"Track name mismatch. Running: {self.static_info['TrackFullName']} Configured: {self.track_name}"
             assert self.static_info["CarName"] == self.car_name, f"Track name mismatch. Running: {self.static_info['CarName']} Configured: {self.car_name}"
 
+        #self.client.reset(self.send_reset_at_start)
+
+        random_ballast = None
+        if self.car_ballast_range is not None:
+            min_ballast, max_ballast = self.car_ballast_range
+            random_ballast = random.uniform(min_ballast, max_ballast)
+            logger.debug(f"Randomizing car ballast to: {random_ballast:.2f} kg")
+
+        random_road_temp = None
+        if self.config.get('track_temp_range') is not None:
+            min_temp, max_temp = self.config.track_temp_range
+            random_road_temp = random.uniform(min_temp, max_temp)
+            logger.debug(f"Randomizing track road temperature to: {random_road_temp:.2f} C")
+
+        random_track_grip = None
+        if self.config.get('track_grip_range') is not None:
+            min_grip, max_grip = self.config.track_grip_range
+            min_grip = max(85, min(min_grip, 100))
+            max_grip = max(85, min(max_grip, 100))
+            random_track_grip = random.uniform(min_grip, max_grip)
+            logger.debug(f"Randomizing track road temperature to: {random_track_grip:.2f} C")
+
+        # --- Domain Randomization: Update race.ini and restart AC ---
+        # Update race.ini with new random parameters
+        self._update_race_ini(ballast=random_ballast, road_temp=random_road_temp, track_grip=random_track_grip)
+        logger.info(f"Updated race.ini with ballast={random_ballast:.2f}kg, road_temp={random_road_temp:.2f}C, random_track_grip={random_track_grip:.2f}")
+
+        # Restart Assetto Corsa process
+        logger.info("Restarting Assetto Corsa process for new parameters...")
+        self._restart_assetto_corsa()
+        logger.info("Assetto Corsa restarted. Re-establishing client connection.")
+        # --- End Domain Randomization ---
+
+        # Re-establish client connection *after* AC has restarted
         self.client.reset(self.send_reset_at_start)
 
         self.termination_counter = int(TERMINAL_JUDGE_TIMEOUT * self.ctrl_rate)
@@ -858,6 +903,79 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
     def get_lap_count(self, states):
         lap_count = sorted( list(set(i["LapCount"] for i in states)) )
         return len(lap_count)
+    
+    def _update_race_ini(self, ballast=None, road_temp=None, track_grip=None):
+        """
+        Updates the race.ini file with new ballast and road temperature values.
+        """
+        if not os.path.exists(self.race_ini_path):
+            logger.error(f"race.ini not found at {self.race_ini_path}. Cannot randomize parameters.")
+            return
+
+        with open(self.race_ini_path, 'r') as f:
+            lines = f.readlines()
+
+        with open(self.race_ini_path, 'w') as f:
+            for line in lines:
+                if ballast is not None and line.strip().startswith("BALLAST="):
+                    f.write(f"BALLAST={int(ballast)}\n")
+                    logger.debug(f"Updated race.ini: BALLAST={int(ballast)}")
+                elif road_temp is not None and line.strip().startswith("AMBIENT="):
+                    # ROAD_TEMPERATURE expects integer values in race.ini
+                    f.write(f"AMBIENT={int(road_temp*0.709)}\n")
+                    logger.debug(f"Updated race.ini: [TEMPERATURE] AMBIENT={int(road_temp*0.709)}")
+                elif road_temp is not None and line.strip().startswith("ROAD="):
+                    f.write(f"ROAD={int(road_temp)}\n")
+                    logger.debug(f"Updated race.ini: [TEMPERATURE] ROAD={int(road_temp)}")
+                elif track_grip is not None and line.strip().startswith("SESSION_START="):
+                    f.write(f"SESSION_START={int(track_grip)}\n")
+                    logger.debug(f"Updated race.ini: GRIP={int(track_grip)}")
+                else:
+                    f.write(line)
+
+    def _restart_assetto_corsa(self):
+        """
+        Kills the current acs.exe process and restarts it.
+        """
+        # Kill existing Assetto Corsa process
+        logger.info("Attempting to kill existing acs.exe process...")
+        try:
+            if sys.platform == "win32":
+                subprocess.run(['taskkill', '/F', '/IM', 'acs.exe'], check=True, capture_output=True)
+            else: # For Linux (Proton)
+                # Find the PID of the Assetto Corsa process running under Proton
+                # This is a bit tricky as the process name might vary. A common strategy is to find `wine64-preloader` or `acs.exe` (if `ps aux` shows it)
+                # or more robustly, find the Steam process for AC and target its child processes.
+                # For simplicity, we'll try to find `acs.exe` directly, which `ps aux` might show for Proton setups.
+                # NOTE: This part might need adjustment depending on your specific Linux/Proton setup.
+                try:
+                    pid = subprocess.check_output(['pgrep', '-f', 'acs.exe']).decode().strip().split('\n')[0]
+                    subprocess.run(['kill', '-9', pid], check=True, capture_output=True)
+                except subprocess.CalledProcessError:
+                    logger.warning("acs.exe process not found by pgrep, attempting to kill wine64-preloader if found.")
+                    try:
+                        pid = subprocess.check_output(['pgrep', '-f', 'wine64-preloader']).decode().strip().split('\n')[0]
+                        subprocess.run(['kill', '-9', pid], check=True, capture_output=True)
+                    except subprocess.CalledProcessError:
+                        logger.warning("wine64-preloader process not found either. AC might not be running or its process name differs.")
+            logger.info("acs.exe process killed successfully (or was not running).")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Failed to kill acs.exe process: {e.stderr.decode().strip()}. It might not have been running.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while trying to kill acs.exe: {e}")
+
+        # Restart Assetto Corsa
+        logger.info(f"Restarting Assetto Corsa from: {self.ac_exe_path}")
+        time.sleep(8) # Give AC time to fully close
+        try:
+            # Using Popen to run the game without blocking Python script
+            subprocess.Popen([self.ac_exe_path], cwd="E:/Games/Steam/steamapps/common/assettocorsa")
+            logger.info("Assetto Corsa launched. Waiting for it to initialize...")
+            time.sleep(15) # Give AC time to fully load and be ready for connection
+            logger.info("Assetto Corsa should be ready for connection.")
+        except Exception as e:
+            logger.exception(f"Failed to restart Assetto Corsa from {self.ac_exe_path}")
+            raise
 
     def get_history(self):
         states = self.states

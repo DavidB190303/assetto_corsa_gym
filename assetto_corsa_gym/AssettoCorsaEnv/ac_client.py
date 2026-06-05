@@ -54,6 +54,16 @@ class SimulationManagement:
 
     def get_config(self):
         return eval(self.send_message("get_config", wait_response=True))
+    
+    def set_dynamic_parameters(self, ballast=None, road_temp=None):
+        params = {}
+        if ballast is not None:
+            params["ballast"] = ballast
+        if road_temp is not None:
+            params["road_temp"] = road_temp
+        message = json.dumps({"command": "set_dynamic_parameters", "params": params})
+        self.send_message(message)
+        logger.info(f"Sent dynamic parameters to simulation management server: {params}")
 
 
 class Client():

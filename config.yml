@@ -1,6 +1,7 @@
 load_offline_data: False    # offline pre-training and data loading
 pre_train: False            # pre train using offline data before start online training
-dataset_path: null          # Path to the datasets, null means it will be overridden by the command line if needed
+load_buffer: True        # set to False to prevent loading the .pkl file for the replay buffer
+dataset_path: F:/Data/PML/externalDataset/assettoCorsaGym/data_sets          # Path to the datasets, null means it will be overridden by the command line if needed
 work_dir: null              # Path to run the model from (default: None)
 task: AssettoCorsaGym
 seed: 0
@@ -20,16 +21,17 @@ steps: null # placeholder
 
 Agent:
   num_steps: 8_000_000
-  batch_size: 128
+  batch_size: 256
   memory_size: 8_000_000
   offline_buffer_size: 12_000_000
-  use_offline_buffer: False # offline dual buffer
+  use_offline_buffer: True # offline dual buffer
   update_interval: 1
   start_steps: 2000
   log_interval: 10
   eval_interval: 0
   num_eval_episodes: 1
   checkpoint_freq: 200_000
+  save_final_buffer: False
 
 SAC:
   gamma: 0.992
@@ -37,8 +39,8 @@ SAC:
   policy_lr: 0.0003
   q_lr: 0.0003
   entropy_lr: 0.0003
-  policy_hidden_units: [256, 256, 256]
-  q_hidden_units: [256, 256, 256]
+  policy_hidden_units: [256, 256]
+  q_hidden_units: [256, 256]
   target_update_coef: 0.005
   log_interval: 10
 
@@ -72,10 +74,15 @@ AssettoCorsa:
   penalize_actions_diff_coef: 0.1
   max_steer_rate: 900.0   # steering: deg/s
   track: "ks_barcelona-layout_gp"  # monza ks_barcelona-layout_gp ks_red_bull_ring-layout_gp, indianapolis_sp, ks_silverstone-gp
-  car: "dallara_f317"              # dallara_f317, ks_mazda_miata, bmw_z4_gt3
+  car: "bmw_z4_gt3"              # dallara_f317, ks_mazda_miata, bmw_z4_gt3
   use_ac_out_of_track: True
   add_previous_obs_to_state: True
-  use_reference_line_in_reward: True
+  use_reference_line_in_reward: False
+  car_ballast_range: [0.0, 50.0]  # Example: Randomize ballast between
+  track_temp_range: [20.0, 50.0]  # Example: Randomize track temperature
+  track_grip_range: [85.0, 100.0] # Must be between 85 and 100 in %
+  ac_exe_path: "E:/Games/Steam/steamapps/common/assettocorsa/acs.exe" # Update with your actual path
+  ac_cfg_path: "C:/Users/david/OneDrive/Dokumente/Assetto Corsa/cfg" # Update with your actual path to Documents/Assetto Corsa/cfg
   use_target_speed: False
   screen_capture_enable: False
   # This should be a multiple of the resolution set in Assetto Corsa to avoid cropping and padding
