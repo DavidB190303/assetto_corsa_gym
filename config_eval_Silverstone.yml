@@ -1,7 +1,7 @@
 load_offline_data: False    # offline pre-training and data loading
 pre_train: False            # pre train using offline data before start online training
-load_buffer: True        # set to False to prevent loading the .pkl file for the replay buffer
-dataset_path: F:/Data/PML/externalDataset/assettoCorsaGym/data_sets          # Path to the datasets, null means it will be overridden by the command line if needed
+load_buffer: False        # set to False to prevent loading the .pkl file for the replay buffer
+dataset_path: null          # Path to the datasets, null means it will be overridden by the command line if needed
 work_dir: null              # Path to run the model from (default: None)
 task: AssettoCorsaGym
 seed: 0
@@ -30,7 +30,7 @@ Agent:
   log_interval: 10
   eval_interval: 0
   num_eval_episodes: 1
-  checkpoint_freq: 200_000
+  checkpoint_freq: 100_000
   save_final_buffer: False
 
 SAC:
@@ -51,9 +51,9 @@ DisCor:
 
 AssettoCorsa:
   ego_sampling_freq: 25     # in Hz
-  max_episode_py_time: 600. # in seconds
+  max_episode_py_time: 300. # in seconds
   gap_const: 12.
-  eval_number_of_laps: 4    # including out lap which is incomplete
+  eval_number_of_laps: 100    # including out lap which is incomplete
   save_lap_csv: False
   remote_machine_ip: "localhost"   # "192.168.0.1" # "localhost"
   ego_server_port: 2345
@@ -73,14 +73,17 @@ AssettoCorsa:
   penalize_actions_diff: False
   penalize_actions_diff_coef: 0.1
   max_steer_rate: 900.0   # steering: deg/s
-  track: "ks_barcelona-layout_gp"  # monza ks_barcelona-layout_gp ks_red_bull_ring-layout_gp, indianapolis_sp, ks_silverstone-gp
+  track: "ks_silverstone-gp"  # monza ks_barcelona-layout_gp ks_red_bull_ring-layout_gp, indianapolis_sp, ks_silverstone-gp
   car: "bmw_z4_gt3"              # dallara_f317, ks_mazda_miata, bmw_z4_gt3
   use_ac_out_of_track: True
   add_previous_obs_to_state: True
   use_reference_line_in_reward: False
-  car_ballast_range: [0.0, 50.0]
-  track_temp_range: [20.0, 50.0]
-  track_grip_range: [85.0, 100.0] # Must be between 85 and 100 in %
+  car_ballast_range: [0.0, 0.0]
+  track_temp_range: [26.0, 26.0]
+  track_grip_range: [100.0, 100.0] # Must be between 85 and 100 in %
+  enable_random_start_pos: True # Set to True to enable random starting positions on the track
+  random_start_pos_spline_range: [0.0, 1.0] # Range for normalized spline position (0.0 to 1.0)
+  random_start_pos_lateral_range: [-1.0, 1.0] # Range for lateral offset from centerline (-1.0 = full left, 1.0 = full right)
   ac_exe_path: "E:/Games/Steam/steamapps/common/assettocorsa/acs.exe"
   ac_cfg_path: "C:/Users/david/OneDrive/Dokumente/Assetto Corsa/cfg"
   use_target_speed: False

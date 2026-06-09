@@ -1,0 +1,9 @@
+Training:
+python train.py --load_path F:\Data\PML\assetto_corsa_gym\outputs\Frankenstein\final AssettoCorsa.track=ks_barcelona-layout_gp AssettoCorsa.car=bmw_z4_gt3
+
+python train.py --config F:\Data\PML\assetto_corsa_gym\config_shorter_ep.yml --load_path F:\Data\PML\assetto_corsa_gym\outputs\Frankenstein\final AssettoCorsa.track=ks_barcelona-layout_gp AssettoCorsa.car=bmw_z4_gt3
+
+(Generate replay Buffer: python train.py --load_path F:\Data\PML\assetto_corsa_gym\outputs\20260603_152018.246\model\final load_offline_data=True Agent.use_offline_buffer=True dataset_path=F:\Data\PML\externalDataset\assettoCorsaGym\data_sets AssettoCorsa.track=ks_barcelona-layout_gp AssettoCorsa.car=bmw_z4_gt3)
+
+Eval:
+python train.py --test --config F:\Data\PML\assetto_corsa_gym\config_eval_Silverstone.yml --load_path F:\Data\PML\assetto_corsa_gym\outputs\short_EPs_only\model\final AssettoCorsa.track=ks_silverstone-gp AssettoCorsa.car=bmw_z4_gt3

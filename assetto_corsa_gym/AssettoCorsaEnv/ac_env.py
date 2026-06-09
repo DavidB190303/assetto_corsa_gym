@@ -702,29 +702,44 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         logger.info("Restarting Assetto Corsa process for new parameters...")
         self._restart_assetto_corsa()
         logger.info("Assetto Corsa restarted. Re-establishing client connection.")
-        # --- End Domain Randomization ---
 
-        # Re-establish client connection *after* AC has restarted
-        self.client.reset(self.send_reset_at_start)
+        # 1. CRITICAL FIX: Do NOT send the server reset command!
+        # The game just restarted, so it's fresh. Sending reset forces the car back to the hotlap start line!
+        self.client.reset(send_reset=False)
+
+        # 2. TRIGGER TELEPORT IMMEDIATELY AT INITIALIZATION
+        if self.config.get('enable_random_start_pos'):
+            self._trigger_spawn_randomization()
 
         self.termination_counter = int(TERMINAL_JUDGE_TIMEOUT * self.ctrl_rate)
         self.episode_saved = False
         self.is_out_of_track = False
-        self.current_actions = np.array( [0.0, -1.0, -1.0] )
-        self.start_actions = np.array( [0.0, -1.0, -1.0] )
+        self.current_actions = np.array([0.0, -1.0, -1.0])
+        self.start_actions = np.array([0.0, -1.0, -1.0])
+        self.ep_steps = 0  
 
-        self.ep_steps = 0  # reset steps after flushing the actions
+        # 3. SETTLING PHASE (1.5 SECONDS)
+        # 1.5 seconds of wait time for Lua to read the file, teleport the car, and for it to drop/settle.
+        # Action array: Steer=0, Throttle=-1 (0%), Brake=1 (100% to stop bouncing/rolling)
+        settle_actions = np.array([0.0, -1.0, 1.0]) 
+        teleport_settle_steps = int(1.5 * self.ctrl_rate)
+        
+        for _ in range(teleport_settle_steps):
+            self.step(settle_actions)
 
-        # flush a few steps. Otherwise the history state will be incomplete
+        # Clear the history so the agent's memory isn't filled with free-falling states
+        self.states = []
+        
+        # Flush the final 2 steps with the actual neutral start actions to properly seed the state history
         for _ in range(2):
-            obs, _, _, _ = self.step(self.start_actions)
-
+            self.step(self.start_actions)
+            
         self.states = []
         obs, _, _, info = self.step(self.start_actions)
         self.info = info
 
         self.ep_reward = 0.
-        self.ep_steps = 0  # reset steps after flushing the actions
+        self.ep_steps = 0  
         return obs
 
     def get_info(self):
@@ -904,6 +919,22 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         lap_count = sorted( list(set(i["LapCount"] for i in states)) )
         return len(lap_count)
     
+    def _trigger_spawn_randomization(self):
+        s_min, s_max = self.config.get('random_start_pos_spline_range', [0.0, 1.0])
+        l_min, l_max = self.config.get('random_start_pos_lateral_range', [-1.0, 1.0])
+        
+        # THE FIX: Explicitly match the OneDrive path required by the Lua app
+        cmd_file = r"C:\Users\david\OneDrive\Dokumente\Assetto Corsa\cfg\extension\gym_spawn_cmd.txt"
+        
+        try:
+            # Ensure the directory exists before writing
+            os.makedirs(os.path.dirname(cmd_file), exist_ok=True)
+            with open(cmd_file, 'w') as f:
+                f.write(f"{s_min} {s_max} {l_min} {l_max}")
+            logger.debug(f"Triggered spawn randomization: wrote file to {cmd_file}")
+        except Exception as e:
+            logger.error(f"Failed to write spawn command to {cmd_file}: {e}")
+
     def _update_race_ini(self, ballast=None, road_temp=None, track_grip=None):
         """
         Updates the race.ini file with new ballast and road temperature values.
