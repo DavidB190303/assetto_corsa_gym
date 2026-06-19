@@ -103,25 +103,41 @@ def main():
                   device=device, seed=config.seed, **config.Agent, wandb_logger=wandb_logger)
 
     if not args.test and config.load_offline_data:
-        data_config_file = os.path.abspath(r"./ac_offline_train_paths_gt3.yml")
         logger.info("Loading offline dataset...")
         assert config.dataset_path, "dataset_path not set in config"
         dataset_path = Path(config.dataset_path + os.sep)
 
-        # load data set
-        data = data_loader.read_yml(data_config_file)
+        track = config.AssettoCorsa.track
+        car = config.AssettoCorsa.car
+        track_car_dir = dataset_path / track / car
 
-        for track in data:
-            for car in data[track]:
-                paths = data[track][car]
-                paths = [dataset_path / Path(f"{track}/{car}") / p["id"] / "laps" for p in paths]
-                env_load_config = copy.deepcopy(config)
-                env_load_config.AssettoCorsa.track = track
-                env_load_config.AssettoCorsa.car = car
-                env_load = assettoCorsa.make_ac_env(cfg=env_load_config, work_dir=work_dir)
-                for laps_path in paths:
-                    assert laps_path.exists(), f"{laps_path} not found"
-                    agent.load_pre_train_data(laps_path.as_posix(), env_load)
+        if track_car_dir.exists():
+            logger.info(f"Dynamically loading dataset from {track_car_dir}")
+            subdirs = [d for d in track_car_dir.iterdir() if d.is_dir()]
+            paths = [subdir / "laps" for subdir in subdirs if subdir.name != "20240409_SAC_10M"]
+            env_load_config = copy.deepcopy(config)
+            env_load_config.AssettoCorsa.track = track
+            env_load_config.AssettoCorsa.car = car
+            env_load = assettoCorsa.make_ac_env(cfg=env_load_config, work_dir=work_dir)
+            for laps_path in paths:
+                assert laps_path.exists(), f"{laps_path} not found"
+                agent.load_pre_train_data(laps_path.as_posix(), env_load)
+        else:
+            data_config_file = os.path.abspath(r"./ac_offline_train_paths_gt3.yml")
+            # load data set
+            data = data_loader.read_yml(data_config_file)
+
+            for track in data:
+                for car in data[track]:
+                    paths = data[track][car]
+                    paths = [dataset_path / Path(f"{track}/{car}") / p["id"] / "laps" for p in paths]
+                    env_load_config = copy.deepcopy(config)
+                    env_load_config.AssettoCorsa.track = track
+                    env_load_config.AssettoCorsa.car = car
+                    env_load = assettoCorsa.make_ac_env(cfg=env_load_config, work_dir=work_dir)
+                    for laps_path in paths:
+                        assert laps_path.exists(), f"{laps_path} not found"
+                        agent.load_pre_train_data(laps_path.as_posix(), env_load)
 
         if config.Agent.use_offline_buffer:
             agent._replay_buffer.online(True)

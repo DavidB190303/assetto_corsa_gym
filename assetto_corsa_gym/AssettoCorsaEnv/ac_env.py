@@ -283,6 +283,7 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         self.ep_steps = 0
         self.ep_reward = 0.
         self.stats_saved = False
+        self.is_eval_mode = False
 
         self.client = Client(self.config)
         self.static_info = {}
@@ -549,6 +550,8 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         buf_infos['terminated'] = False  # used by TD MPC
         buf_infos['TimeLimit.truncated'] = False
 
+        fail_reason = None
+
         if state["done"]:
             ### TODO lap ended by AC.. se what to do here
             logger.info("Terminate. Lap ended by Assetto Corsa")
@@ -556,12 +559,14 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
 
         if state['going_backwards'] > 0.:
             logger.info("Terminate episode. Going backwards")
+            fail_reason = "Going backwards"
             buf_infos['terminated'] = True
             done = 1
 
         if self.enable_out_of_track_termination and state['out_of_track']:
             logger.info("Terminate episode. is_out_of_track")
             logger.info(f"out_of_track. N wheels out: {state['numberOfTyresOut']}. LapDist: {state['LapDist']} x: {x:.2f} y: {y:.2f}")
+            fail_reason = f"Out of track (N wheels out: {state['numberOfTyresOut']})"
             buf_infos['terminated'] = True
             done = 1
 
@@ -581,6 +586,7 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
             self.termination_counter -= 1
             if self.termination_counter <= 0:
                 logger.info("Race stopped. Speed too low")
+                fail_reason = "Speed too low"
                 buf_infos['terminated'] = True
                 done = 1
             # else:
@@ -591,7 +597,91 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         # check gap
         if self.max_gap and np.abs(gap) > self.max_gap:
             logger.info(f"Race stopped. Gap too big ({gap})")
+            fail_reason = f"Gap too big ({gap:.2f})"
             done = 1
+
+        # ==== EVALUATION MODE: in-place recovery + per-lap logging ====
+        if self.is_eval_mode:
+            # Initialize lap tracking on first step of episode
+            if self.eval_last_lap_count is None:
+                self.eval_last_lap_count = state.get('LapCount', 0)
+
+            current_lap_count = state.get('LapCount', self.eval_last_lap_count)
+
+            # --- Detect lap completion (LapCount incremented) and log immediately ---
+            if current_lap_count > self.eval_last_lap_count:
+                completed_lap_index = len(self.eval_lap_results)  # 0-based
+                lap_failures = list(self.eval_current_lap_failures)
+                lap_status = "CLEAN" if len(lap_failures) == 0 else "FAILED"
+                lap_result = {
+                    "lap_index": completed_lap_index,
+                    "ac_lap_count": self.eval_last_lap_count,
+                    "status": lap_status,
+                    "num_failures": len(lap_failures),
+                    "failures": lap_failures,
+                    "lap_steps": self.ep_steps - self.eval_lap_start_step,
+                }
+                self.eval_lap_results.append(lap_result)
+
+                # Immediate per-lap log
+                logger.info(
+                    f"[EVAL LAP {completed_lap_index}] status={lap_status} "
+                    f"failures={len(lap_failures)} steps={lap_result['lap_steps']}"
+                )
+                for i, f in enumerate(lap_failures):
+                    logger.info(
+                        f"    failure[{i}]: reason={f['reason']} "
+                        f"LapDist={f['lap_dist']:.1f} x={f['x']:.2f} y={f['y']:.2f} step={f['step']}"
+                    )
+
+                # Roll over per-lap state
+                self.eval_current_lap_failures = []
+                self.eval_last_lap_count = current_lap_count
+                self.eval_lap_start_step = self.ep_steps
+
+            # --- Handle failure: recover in place, continue episode ---
+            if done == 1 and fail_reason is not None:
+                failure_record = {
+                    "lap_index": len(self.eval_lap_results),  # lap currently being driven
+                    "ac_lap_count": current_lap_count,
+                    "reason": fail_reason,
+                    "x": float(x),
+                    "y": float(y),
+                    "lap_dist": float(state.get('LapDist', -1.0)),
+                    "step": int(self.ep_steps),
+                }
+                self.eval_current_lap_failures.append(failure_record)
+                self.eval_failures.append(failure_record)
+
+                logger.warning(
+                    f"[EVAL FAIL] lap={failure_record['lap_index']} reason={fail_reason} "
+                    f"LapDist={failure_record['lap_dist']:.1f} x={x:.2f} y={y:.2f} "
+                    f"-> recovering in place, lap will be marked FAILED"
+                )
+
+                self.recover_car()
+
+                # Reset short-horizon counters so we don't immediately re-trigger
+                self.termination_counter = int(TERMINAL_JUDGE_TIMEOUT * self.ctrl_rate)
+                self.is_out_of_track = False
+
+                # Expose info for the agent / wrapper
+                buf_infos['eval_failed'] = True
+                buf_infos['eval_failures_this_lap'] = list(self.eval_current_lap_failures)
+                buf_infos['eval_last_failure'] = failure_record
+
+                # Continue the episode
+                done = 0
+                buf_infos['terminated'] = False
+                fail_reason = None
+
+            # --- Terminate episode once we've completed the configured number of laps ---
+            if len(self.eval_lap_results) >= self.max_laps_number:
+                logger.info(f"[EVAL] Reached target lap count ({self.max_laps_number}). Ending episode.")
+                done = 1
+                buf_infos['terminated'] = True
+        # ===============================================================
+
 
         # extra channels in the info variable
         if self.use_obs_extra:
@@ -671,8 +761,6 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
             assert self.static_info["TrackFullName"] == self.track_name, f"Track name mismatch. Running: {self.static_info['TrackFullName']} Configured: {self.track_name}"
             assert self.static_info["CarName"] == self.car_name, f"Track name mismatch. Running: {self.static_info['CarName']} Configured: {self.car_name}"
 
-        #self.client.reset(self.send_reset_at_start)
-
         random_ballast = None
         if self.car_ballast_range is not None:
             min_ballast, max_ballast = self.car_ballast_range
@@ -688,35 +776,45 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
         random_track_grip = None
         if self.config.get('track_grip_range') is not None:
             min_grip, max_grip = self.config.track_grip_range
-            min_grip = max(85, min(min_grip, 100))
-            max_grip = max(85, min(max_grip, 100))
             random_track_grip = random.uniform(min_grip, max_grip)
             logger.debug(f"Randomizing track road temperature to: {random_track_grip:.2f} C")
 
-        # --- Domain Randomization: Update race.ini and restart AC ---
-        # Update race.ini with new random parameters
-        self._update_race_ini(ballast=random_ballast, road_temp=random_road_temp, track_grip=random_track_grip)
-        logger.info(f"Updated race.ini with ballast={random_ballast:.2f}kg, road_temp={random_road_temp:.2f}C, random_track_grip={random_track_grip:.2f}")
-
-        # Restart Assetto Corsa process
-        logger.info("Restarting Assetto Corsa process for new parameters...")
-        self._restart_assetto_corsa()
-        logger.info("Assetto Corsa restarted. Re-establishing client connection.")
-
-        # 1. CRITICAL FIX: Do NOT send the server reset command!
-        # The game just restarted, so it's fresh. Sending reset forces the car back to the hotlap start line!
-        self.client.reset(send_reset=False)
-
-        # 2. TRIGGER TELEPORT IMMEDIATELY AT INITIALIZATION
-        if self.config.get('enable_random_start_pos'):
-            self._trigger_spawn_randomization()
+        if not self.is_eval_mode:
+            # --- Domain Randomization: Update race.ini and restart AC ---
+            # Update race.ini with new random parameters
+            self._update_race_ini(ballast=random_ballast, road_temp=random_road_temp, track_grip=random_track_grip)
+            logger.info(f"Updated race.ini with ballast={random_ballast:.2f}kg, road_temp={random_road_temp:.2f}C, random_track_grip={random_track_grip:.2f}")
+    
+            # Restart Assetto Corsa process
+            logger.info("Restarting Assetto Corsa process for new parameters...")
+            self._restart_assetto_corsa()
+            logger.info("Assetto Corsa restarted. Re-establishing client connection.")
+    
+            # 1. CRITICAL FIX: Do NOT send the server reset command!
+            # The game just restarted, so it's fresh. Sending reset forces the car back to the hotlap start line!
+            self.client.reset(send_reset=False)
+    
+            # 2. TRIGGER TELEPORT IMMEDIATELY AT INITIALIZATION
+            if self.config.get('enable_random_start_pos'):
+                self._trigger_spawn_randomization()
+        else:
+            self.client.reset(self.send_reset_at_start)
 
         self.termination_counter = int(TERMINAL_JUDGE_TIMEOUT * self.ctrl_rate)
         self.episode_saved = False
         self.is_out_of_track = False
         self.current_actions = np.array([0.0, -1.0, -1.0])
         self.start_actions = np.array([0.0, -1.0, -1.0])
-        self.ep_steps = 0  
+        self.ep_steps = 0
+
+        # === Eval-mode per-episode tracking ===
+        if self.is_eval_mode:
+            self.eval_failures = []              # all failures across the episode
+            self.eval_current_lap_failures = []  # failures in the currently-running lap
+            self.eval_lap_results = []           # per-lap result dicts, logged as laps complete
+            self.eval_last_lap_count = None      # set on first step from state['LapCount']
+            self.eval_lap_start_step = self.ep_steps
+
 
         # 3. SETTLING PHASE (1.5 SECONDS)
         # 1.5 seconds of wait time for Lua to read the file, teleport the car, and for it to drop/settle.
@@ -1044,3 +1142,4 @@ class AssettoCorsaEnv(Env, gym_utils.EzPickle):
     def set_eval_mode(self):
         self.max_laps_number = self.config.eval_number_of_laps
         self.use_ac_out_of_track = True
+        self.is_eval_mode = True
